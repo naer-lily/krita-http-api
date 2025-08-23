@@ -24,7 +24,24 @@ def get_layers(_, ok, fail):
     doc.node
     pass
 
+@route('document/open', {
+    'path': str
+})
+def open_new_image(req):
+    doc = Krita.instance().openDocument(req['path'])
+    active_window().addView(doc)
+    return 'done'
 
+
+@route('document/convert_to_open', {
+    'original_path': str,
+    'target_path': str,
+})
+def export(req):
+    doc = Krita.instance().openDocument(req['original_path'])
+    doc.saveAs(req['target_path'])
+    active_window().addView(doc)
+    return 'done'
 
 # class GetImageThread(QThread):
 #     request_image = pyqtSignal()
