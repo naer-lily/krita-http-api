@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import QLineEdit
 from ..routing import Request, ResponseFail
 from ..utils import active_document, active_window, DocumentInfo
 from ..PerWindowCachedState import PerWindowCachedState
-from .route import route, async_route
+from .route import route, async_route, sleep
 
 
 class OpenDocumentModel(BaseModel):
@@ -28,6 +28,10 @@ class ConvertOpenModel(BaseModel):
 
 class ImageModel(BaseModel):
     withImage: bool
+
+
+class ImageTiledModel(BaseModel):
+    tileSize: int = 256
 
 
 @route("document/layers")
@@ -104,6 +108,31 @@ def get_image(req: Request[ImageModel]) -> dict:
         result["getBase64Cost"] = round((c - b) * 1000)
 
     return result
+
+
+@async_route("document/image-tiled")
+def get_image_tiled(req: Request[ImageTiledModel]) -> dict:
+    """Get document pixel data in tiles. Yields sleep(0) between tiles so Qt stays responsive."""
+    doc = active_document()
+    if doc is None:
+        raise ResponseFail("No active document")
+
+    w, h = doc.width(), doc.height()
+    tile_size = req.params.tileSize
+
+    tiles = []
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            tw = min(tile_size, w - x)
+            th = min(tile_size, h - y)
+            pixel_data = doc.pixelData(x, y, tw, th)
+            tiles.append({
+                "x": x, "y": y, "w": tw, "h": th,
+                "base64": str(pixel_data.toBase64(), "utf-8"),
+            })
+            yield from sleep(0)
+
+    return {"w": w, "h": h, "tileSize": tile_size, "tiles": tiles}
 
 
 def _get_record_dir(window):
