@@ -5,16 +5,18 @@ Install pydantic for parameter validation:
     pip install --target=./third_deps pydantic
 """
 import inspect
+import types
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, Union, get_type_hints, get_args, get_origin
 
 from .Logger import Logger
+from .event_loop import EventLoop
 
 logger = Logger("routing")
 
 
 class ResponseFail(Exception):
-    """Raise in sync handlers to respond with an error."""
+    """Raise in route handlers to respond with an error."""
 
     def __init__(self, msg: str, res=None):
         super().__init__(msg)
@@ -23,44 +25,16 @@ class ResponseFail(Exception):
 
 
 T = TypeVar("T")
-OkT = TypeVar("OkT")
 
 
 class Request(Generic[T]):
-    """Synchronous route request wrapper. Access validated params via ``.params``."""
+    """Route request wrapper. Access validated params via ``.params``."""
 
     __slots__ = ("code", "params")
 
     def __init__(self, code: str, params: T):
         self.code = code
         self.params = params
-
-
-class AsyncRequest(Generic[T, OkT]):
-    """Asynchronous route request wrapper. Call ``.ok()`` or ``.fail()`` to respond."""
-
-    __slots__ = ("code", "params", "_ok_cb", "_fail_cb", "_responded")
-
-    def __init__(self, code: str, params: T, ok_cb: Callable, fail_cb: Callable):
-        self.code = code
-        self.params = params
-        self._ok_cb = ok_cb
-        self._fail_cb = fail_cb
-        self._responded = False
-
-    def ok(self, result: OkT = None):
-        """Respond with a successful result."""
-        if self._responded:
-            return
-        self._responded = True
-        self._ok_cb(result)
-
-    def fail(self, msg: str, data=None):
-        """Respond with an error."""
-        if self._responded:
-            return
-        self._responded = True
-        self._fail_cb(msg, data)
 
 
 @dataclass
@@ -95,21 +69,14 @@ class HttpRouter:
             break
 
         param_type = None
-        ok_type = None
 
         if req_hint is not None:
             origin = get_origin(req_hint)
             args = get_args(req_hint)
-            if req_hint is Request or req_hint is AsyncRequest:
-                pass
-            elif origin in (Request, AsyncRequest):
-                if len(args) >= 1:
-                    param_type = args[0]
-                if not sync and len(args) >= 2:
-                    ok_type = args[1]
+            if origin is Request and len(args) >= 1:
+                param_type = args[0]
 
-        if sync and ok_type is None:
-            ok_type = return_hint
+        ok_type = return_hint
 
         self._routes[code] = RouteDef(
             code=code,
@@ -166,12 +133,27 @@ class HttpRouter:
                 return fail_cb(str(e), None)
             ok_cb(result)
         else:
-            request = AsyncRequest(code=code, params=validated, ok_cb=ok_cb, fail_cb=fail_cb)
+            request = Request(code=code, params=validated)
             try:
-                route.handler(request)
+                result = route.handler(request)
+            except ResponseFail as e:
+                return fail_cb(e.msg, e.res)
             except Exception as e:
-                if not request._responded:
-                    fail_cb(str(e), None)
+                return fail_cb(str(e), None)
+
+            if isinstance(result, types.GeneratorType):
+                def _drive():
+                    try:
+                        value = yield from result
+                        ok_cb(value)
+                    except ResponseFail as e:
+                        fail_cb(e.msg, e.res)
+                    except Exception as e:
+                        fail_cb(str(e), None)
+
+                EventLoop.get_event_loop().run_coroutine(_drive())
+            else:
+                ok_cb(result)
 
     # ------------------------------------------------------------------ #
     #  validation
@@ -289,11 +271,9 @@ def _type_repr(tp: Any) -> str:
 
 
 def _default_repr(field_info) -> str:
-    from pydantic.fields import PydanticUndefined
-
-    default = field_info.default
-    if default is PydanticUndefined:
+    if field_info.is_required():
         return "*required*"
+    default = field_info.default
     if default is None:
         return "`None`"
     return f"`{default}`"
@@ -330,13 +310,27 @@ def route(code: str):
 def async_route(code: str):
     """Register an **asynchronous** route.
 
-    Usage::
+    Generator style (yield from sleep / future)::
 
-        @async_route('document/image')
-        def get_image(req: AsyncRequest[ImageParams, ImageResult]):
+        @async_route('wait-animation')
+        def wait_animation(req: Request) -> dict:
+            yield from sleep(100)
+            return {"done": True}
+
+        @async_route('dialog/wait')
+        def dialog_wait(req: Request[str]) -> dict:
+            fut, resolve = create_future()
+            QTimer.singleShot(100, lambda: resolve("done"))
+            result = yield from fut
+            return {"result": result}
+
+    Procedural style (no yield — just return/raise)::
+
+        @async_route('doc/image')
+        def get_image(req: Request[ImageModel]) -> dict:
             if not doc:
-                return req.fail("no document")
-            req.ok(ImageResult(...))
+                raise ResponseFail("no document")
+            return {"width": doc.width()}
     """
 
     def decorator(func):

@@ -11,7 +11,7 @@ from krita import Krita
 
 from PyQt5.QtWidgets import QLineEdit
 
-from ..routing import Request, AsyncRequest, ResponseFail
+from ..routing import Request, ResponseFail
 from ..utils import active_document, active_window, DocumentInfo
 from ..PerWindowCachedState import PerWindowCachedState
 from .route import route, async_route
@@ -78,11 +78,11 @@ def convert_open(req: Request[ConvertOpenModel]) -> str:
 
 
 @async_route("document/image")
-def get_image(req: AsyncRequest[ImageModel, dict]):
+def get_image(req: Request[ImageModel]) -> dict:
     """Get document pixel data (width, height, depth, model, optional base64)."""
     doc = active_document()
     if doc is None:
-        return req.fail("No active document")
+        raise ResponseFail("No active document")
 
     w, h = doc.width(), doc.height()
     depth = doc.colorDepth()
@@ -103,7 +103,7 @@ def get_image(req: AsyncRequest[ImageModel, dict]):
         result["base64"] = base64
         result["getBase64Cost"] = round((c - b) * 1000)
 
-    req.ok(result)
+    return result
 
 
 def _get_record_dir(window):
@@ -117,14 +117,14 @@ _recorder_dir_widget = PerWindowCachedState(_get_record_dir)
 
 
 @async_route("document/records")
-def get_records(req: AsyncRequest):
+def get_records(req: Request) -> dict:
     """Get recording directory and frame files."""
     doc = active_document()
     if doc is None:
-        return req.fail("No active document")
+        raise ResponseFail("No active document")
 
     if not Krita.instance().action("recorder_record_toggle").isChecked:
-        return req.fail("not recording")
+        raise ResponseFail("not recording")
 
     dir_obj = _recorder_dir_widget.get(active_window())
     record_directory = dir_obj.text()
@@ -136,10 +136,10 @@ def get_records(req: AsyncRequest):
     doc_record_path = os.path.join(record_directory, formatted_date).replace("\\", "/")
 
     if not os.path.exists(doc_record_path):
-        return req.fail("No record yet")
+        raise ResponseFail("No record yet")
 
-    req.ok(dict(
+    return dict(
         w=w, h=h, depth=depth, model=model,
         path=doc_record_path,
         records=os.listdir(doc_record_path),
-    ))
+    )

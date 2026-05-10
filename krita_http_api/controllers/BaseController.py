@@ -10,9 +10,9 @@ from krita import Krita
 from PyQt5.QtCore import QTimer, QSize
 from PyQt5.QtGui import QIcon
 
-from ..routing import Request, AsyncRequest, ResponseFail
+from ..routing import Request, ResponseFail
 from ..utils import qimage_to_png_base64, floating_message
-from .route import route, async_route, router
+from .route import route, async_route, router, sleep, create_future
 
 
 class ResourceIconModel(BaseModel):
@@ -117,25 +117,26 @@ def sync_except_test(req: Request) -> dict:
 
 
 @async_route("async-ok-test")
-def async_ok_test(req: AsyncRequest):
-    """Async handler that calls ok after 100ms."""
-    def go():
-        req.ok({"desc": "this is response body"})
-    QTimer.singleShot(100, go)
+def async_ok_test(req: Request) -> dict:
+    """Async handler: sleep 100ms then return."""
+    yield from sleep(100)
+    return {"desc": "this is response body"}
 
 
 @async_route("async-fail-test")
-def async_fail_test(req: AsyncRequest):
-    """Async handler that calls fail after 100ms."""
-    def go():
-        req.fail("this is fail message", {"desc": "this is response body"})
-    QTimer.singleShot(100, go)
+def async_fail_test(req: Request) -> None:
+    """Async handler: sleep 100ms then raise ResponseFail."""
+    yield from sleep(100)
+    raise ResponseFail("this is fail message", {"desc": "this is response body"})
 
 
-@async_route("async-timeout-test")
-def async_timeout_test(req: AsyncRequest):
-    """Async handler that never responds (will timeout after 5s)."""
-    pass
+@async_route("async-future-test")
+def async_future_test(req: Request) -> dict:
+    """Async handler: create a future, resolve it via QTimer."""
+    fut, resolve = create_future()
+    QTimer.singleShot(100, lambda: resolve({"desc": "resolved via future"}))
+    result = yield from fut
+    return result
 
 
 _counter = 0

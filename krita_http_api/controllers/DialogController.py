@@ -10,7 +10,7 @@ from krita import Krita
 
 from PyQt5.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QDialogButtonBox
 
-from ..routing import Request, AsyncRequest, ResponseFail
+from ..routing import Request, ResponseFail
 from ..QtEnum import MessageBoxStandardButton, MessageBoxIcon
 from .route import route, async_route
 
@@ -71,16 +71,16 @@ def msg_box(req: Request[MsgBoxModel]) -> str:
 
 
 @async_route("dialog/result")
-def dialog_result(req: AsyncRequest[str, dict]):
+def dialog_result(req: Request[str]) -> dict:
     """Poll the result of a dialog by dialogId.
     Send param as a bare string: {"code": "dialog/result", "param": "<dialogId>"}
     """
     dialog_id = req.params
     if dialog_id not in dialog_status:
-        return req.fail(f"No dialog with id {dialog_id}")
+        raise ResponseFail(f"No dialog with id {dialog_id}")
 
     res = dialog_status[dialog_id]
     if res["type"] != "PENDING":
         del dialog_status[dialog_id]
 
-    req.ok(res)
+    return res
