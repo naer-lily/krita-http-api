@@ -289,12 +289,14 @@ def _type_repr(tp: Any) -> str:
 
 
 def _default_repr(field_info) -> str:
+    from pydantic.fields import PydanticUndefined
+
     default = field_info.default
-    if default is not None and default is not ...:
-        return f"`{default}`"
-    if field_info.is_required():
+    if default is PydanticUndefined:
         return "*required*"
-    return "`None`"
+    if default is None:
+        return "`None`"
+    return f"`{default}`"
 
 
 # ---------------------------------------------------------------------- #
