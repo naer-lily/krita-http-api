@@ -1,8 +1,7 @@
-from krita import *
-from .QHttpServer import QHTTPServer
-from .utils import *
-from PyQt5.QtCore import *
+from krita import Krita, Extension
 
+from .QHttpServer import QHTTPServer
+from .Logger import Logger
 from .controllers.route import router
 
 logger = Logger()

@@ -1,153 +1,131 @@
-from websockets import WebSocketServerProtocol
 import asyncio
-import websockets
 import json
+import threading
 import traceback
-from krita import *
-from .utils import *
-from PyQt5.QtCore import *
+import uuid
+from typing import Callable
 
-# 创建一个 Semaphore 对象，限制最大并发任务数
+import websockets
+from websockets import WebSocketServerProtocol
+
+from PyQt5.QtCore import pyqtSignal, QObject
+
+from .Logger import Logger
+
+
+logger = Logger("QWebsocketServer")
+
+BIZ_TIMEOUT = 5.0
 MAX_CONCURRENT_TASKS = 10
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
 
 class SignalHandler(QObject):
-    new_request = pyqtSignal(str)
-    result_ready = pyqtSignal(str)
+    new_request = pyqtSignal(str, str)
+    result_ready = pyqtSignal(str, str)
 
-    def __init__(self):
-        super().__init__()
 
-    @pyqtSlot(str)
-    def result_ready_emit(self, body):
-        print('result_ready: me dynamicly emit')
-        self.result_ready.emit(body)
-        
-    @pyqtSlot(object)
-    def result_ready_connect(self, go):
-        print('result_ready: me dynamicly connect')
-        def mygo(r):
-            go(r)
-            self.result_ready.disconnect(mygo)
-        self.result_ready.connect(mygo)
-
-    @pyqtSlot(str)
-    def new_request_emit(self, body):
-        print('new_request_emit: me dynamicly emit')
-        self.new_request.emit(body)
-
-    @pyqtSlot(object)
-    def new_request_connect(self, go):
-        print('new_request: me dynamicly connect')
-        def mygo(r):
-            go(r)
-            self.new_request.disconnect(mygo)
-        self.new_request.connect(mygo)
-        
-
-class QWebsocketServer(QThread):
+class QWebsocketServer(threading.Thread):
     def __init__(self, port=8765):
-        super().__init__()
-        self.__signal_handler = SignalHandler()
-        self.__port = port
+        super().__init__(daemon=True)
+        self._signal_handler = SignalHandler()
+        self._port = port
         self.clients: dict[str, WebSocketServerProtocol] = {}
-        def default_request_handler(request_body):
-            # at Qt Event Loop here
-            print('new_request emitted, (i.e. emit result_ready) with request:', request_body)
-            self.__signal_handler.result_ready.emit(request_body) 
-        self.__request_handler = default_request_handler
-        
+        self._futures: dict[str, asyncio.Future] = {}
+        self._futures_lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
-    async def __per_message(self, websocket: WebSocketServerProtocol, message: str):
-        # 2. wait for result ready (use Future)
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        def go(response_body):
-            loop.call_soon_threadsafe(lambda: future.set_result(response_body))
-        
-        QMetaObject.invokeMethod(self.__signal_handler, "result_ready_connect", Q_ARG(object, go))
-        
-        # 1. emit new_request
-        self.__signal_handler.new_request.emit(message)
+        self._signal_handler.result_ready.connect(self._on_result_ready)
 
-        # TODO 3. wait and send result
+    def _on_result_ready(self, request_id: str, response_json: str):
+        with self._futures_lock:
+            future = self._futures.pop(request_id, None)
+        if future is not None and self._loop is not None:
+            self._loop.call_soon_threadsafe(future.set_result, response_json)
+
+    async def _per_message(self, websocket: WebSocketServerProtocol, message: str):
         try:
-            print('before resolve')
-            result = await future
-            print('after resolve')
+            request_json = json.loads(message)
+            request_id = request_json.get('request_id', str(uuid.uuid4()))
+        except json.JSONDecodeError:
+            request_id = str(uuid.uuid4())
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        with self._futures_lock:
+            self._futures[request_id] = future
+
+        try:
+            self._signal_handler.new_request.emit(request_id, message)
+            result = await asyncio.wait_for(future, timeout=BIZ_TIMEOUT)
         except asyncio.TimeoutError:
-            result = json.dumps(dict(
-                ok=False,
-                data='TIMEOUT'
-            ))
+            result = json.dumps({'ok': False, 'msg': 'TIMEOUT'})
+        finally:
+            with self._futures_lock:
+                self._futures.pop(request_id, None)
 
         await websocket.send(result)
 
-    async def __echo(self, websocket: WebSocketServerProtocol, path: str) -> None:
-        # 为每个连接生成唯一标识符
+    async def _echo(self, websocket: WebSocketServerProtocol, path: str) -> None:
         connection_id = str(uuid.uuid4())
-        
-        # 将客户端添加到字典中
         self.clients[connection_id] = websocket
-        print(f"Client connected: {connection_id}")
+        logger.info(f"Client connected: {connection_id}")
 
         try:
             async for message in websocket:
-                async with semaphore:
-                    asyncio.create_task(self.__per_message(websocket, message))
-        
+                async with self._semaphore:
+                    asyncio.create_task(self._per_message(websocket, message))
         except websockets.ConnectionClosed:
-            print(f"Client disconnected: {connection_id}")
+            logger.info(f"Client disconnected: {connection_id}")
         finally:
             if connection_id in self.clients:
                 del self.clients[connection_id]
-                print(f"Client removed from list: {connection_id}")
 
-    async def __main(self):
-        async with websockets.serve(self.__echo, "localhost", self.__port):
-            print("Server started...")
-            await asyncio.Future()  # run forever
+    async def _main(self):
+        self._loop = asyncio.get_running_loop()
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+        async with websockets.serve(self._echo, "localhost", self._port):
+            logger.info(f"WebSocket server started on port {self._port}")
+            await asyncio.Future()
 
-    def on_request(self, cb: Callable[[dict, Callable[[dict], None], Callable[[dict], None]], None]):
-        # self.__request_handler = None
-        assert cb is not None
-        def resolve(msg: dict):
-            self.__signal_handler.result_ready.emit(json.dumps(msg)) 
-
-        def cbs(request_id: str):
-            def ok(res):
-                resolve({
-                    'ok': True,
-                    'data': res,
-                    'request_id': request_id,
-                })
-            def fail(msg, res):
-                stack_trace = traceback.format_exc()
-                resolve({
-                    'ok': False,
-                    'msg': msg,
-                    'data': res,
-                    'call_stack': stack_trace,
-                    'request_id': request_id,
-                })
-            return ok, fail
-        
-        def __on_request(request_body):
-            print('new_request emitted, (i.e. emit result_ready) with request:', request_body)
+    def on_request(self, cb: Callable):
+        def _on_request(request_id: str, request_body: str):
             try:
                 request_json = json.loads(request_body)
-            except:
-                # shoudl never be here, otherwise everything will messed up
-                return resolve({
+            except Exception:
+                self._signal_handler.result_ready.emit(request_id, json.dumps({
                     'ok': False,
                     'msg': "expect a json object, got ...(check 'data' field)",
                     'data': request_body,
-                    'request_id': '',
-                })
-            return cb(request_json, *cbs(request_json.get('request_id', ''))) 
-            
-        self.__request_handler = __on_request
-        self.__signal_handler.new_request.connect(self.__request_handler)
+                    'request_id': request_id,
+                }))
+                return
 
-    def run(self):  
-        asyncio.run(self.__main())
+            def ok(res):
+                self._signal_handler.result_ready.emit(request_id, json.dumps({
+                    'ok': True,
+                    'data': res,
+                    'request_id': request_id,
+                }))
+
+            def fail(msg, res=None):
+                self._signal_handler.result_ready.emit(request_id, json.dumps({
+                    'ok': False,
+                    'msg': msg,
+                    'data': res,
+                    'call_stack': traceback.format_exc(),
+                    'request_id': request_id,
+                }))
+
+            try:
+                cb(request_json, ok, fail)
+            except Exception as e:
+                stack_trace = traceback.format_exc()
+                logger.warn(f"ws request error: {e}")
+                logger.warn(stack_trace)
+                fail(str(e))
+
+        self._signal_handler.new_request.connect(_on_request)
+
+    def run(self):
+        asyncio.run(self._main())

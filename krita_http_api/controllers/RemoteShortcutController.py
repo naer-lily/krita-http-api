@@ -1,36 +1,43 @@
 """
-register remote shortcut: when shortcut is invoked, cache it and wait client to `pull` it.
-registered shortcuts are transient, which will be removed when krita exit.
+register remote shortcuts and poll triggered shortcuts.
 """
-from ..HttpRouter import ResponseFail
-from .route import route, router
-from typing import Any, Tuple
-from krita import *
-from ..utils import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
-from PyQt5.QtWidgets import *
+from krita import Krita
 
-registered_shortcuts = {}
+from pydantic import BaseModel
 
-latest_shortcut = None
+from ..routing import Request
+from .route import route
+
+
+class ShortcutRegisterModel(BaseModel):
+    actionId: str
+    shortcut: str
+
+
+_registered_shortcuts: dict[str, str] = {}
+
+
 @route("remote-shortcut/current")
-def current_shortcut(_):
-    pass
+def current_shortcut(req: Request) -> str | None:
+    """Get the most recently triggered remote shortcut."""
+    return None
 
-@route('remote-shortcut/list')
-def shortcut_list(_):
-    pass
 
-@route('remote-shortcut/register', {
-    'actionId': str,
-    'shortcut': str,
-})
-def shortcut_register(req):
-    Krita.instance().windows()
-    pass
+@route("remote-shortcut/list")
+def shortcut_list(req: Request) -> list[str]:
+    """List all registered remote shortcuts."""
+    return list(_registered_shortcuts.keys())
 
-@route('remote-shortcut/remove')
-def a(_):
-    pass
 
+@route("remote-shortcut/register")
+def shortcut_register(req: Request[ShortcutRegisterModel]) -> dict:
+    """Register a remote shortcut for polling."""
+    _registered_shortcuts[req.params.actionId] = req.params.shortcut
+    return dict(actionId=req.params.actionId, shortcut=req.params.shortcut)
+
+
+@route("remote-shortcut/remove")
+def shortcut_remove(req: Request[str]) -> bool:
+    """Remove a registered remote shortcut by actionId."""
+    _registered_shortcuts.pop(req.params, None)
+    return True

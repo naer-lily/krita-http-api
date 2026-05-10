@@ -1,75 +1,95 @@
 # Krita HTTP API
 
-Expose Krita API by a HTTP Server and a websocket server)optional). The HTTP Server relies on python standard module `http.server`, a multi-threaded BIO HTTP server, which will read request body and respond a json. 
-
-~~I'm going to replace it with a websocket server for better performance and let krita can push message.~~
+Expose Krita API via an HTTP server and an optional websocket server. Uses Python's `http.server` (ThreadingMixIn) bridged to Qt's main thread via `pyqtSignal` for thread-safe Krita API access.
 
 # Usage
 
-1. Download this repo as ZIP and Open Krita, import it via menu 'Tools/Scripts/Import Python Plugin from File' and make sure plugin 'HTTP API' is enabled.
-2. (optional) if you need websocket server, cd to directory where `__init__.py` belongs to, run `pip install --target=./third_deps websockets`.
-3. restart Krita, **open a document**
-4. execute `curl -d '{"code": "floating-message", "param": {"message": "Hello, World!"} }' localhost:1976`
+1. Download this repo as ZIP and import via Krita menu: **Tools > Scripts > Import Python Plugin from File**. Enable the "HTTP API" plugin.
+2. Install pydantic (required for param validation). Uses your system pip — specify Krita's Python version so the correct binary wheel is fetched:
+   ```bash
+   # Windows — Krita 5.2 uses Python 3.13:
+   cd <plugin_dir>\krita_http_api
+   pip install --target=./third_deps --python-version 3.13 --platform win_amd64 --only-binary :all: pydantic
 
-The HTTP server will listen port 1976, websocket server will listen port 1949. it's not configurable, modify source code if you need change it.
+   # Linux:
+   cd <plugin_dir>/krita_http_api
+   pip install --target=./third_deps --python-version 3.13 --platform linux_x86_64 --only-binary :all: pydantic
 
-If you need add more API, just add more "controller"s in `./controllers`. both sync style and async style(like express.js) API is provided. there's a example for an API definition and implementation. 
+   # Optional: websocket server
+   pip install --target=./third_deps --python-version 3.13 --platform win_amd64 --only-binary :all: websockets
+   ```
+   Verify Krita's Python version first: **Tools > Scripts > Scripter**, run `import sys; print(sys.version)`.
+3. Restart Krita, **open a document**.
+4. Send a request:
+   ```bash
+   curl -d '{"code": "ping", "param": {}}' localhost:1976
+   curl -d '{"code": "floating-message", "param": {"message": "Hello, World!"}}' localhost:1976
+   curl -d '{"code": "__docs__", "param": {}}' localhost:1976   # API documentation
+   ```
+
+Ports: HTTP `1976`, WebSocket `1949` (hardcoded).
+
+# Adding Routes
+
+Use `@route` (sync) or `@async_route` (async) decorators with **pydantic** models for parameter validation:
 
 ```python
-from ..json_validate import Nullable
-from .route import route, router
-from krita import *
+from pydantic import BaseModel
+from .route import route, async_route, Request, AsyncRequest
 
-@route('resource-icon', {
-    'resourceType': str,
-    'resourceName': str,
-    'withMIMEType': Nullable(bool)
-})
-def resourceIcon(req):
-    resource = Krita.instance().resources(req['resourceType'])[req['resourceName']]
-    return qimage_to_png_base64(resource.image(), req.get('withMIMEType', True))
+class FlipModel(BaseModel):
+    horizontal: bool = True
+    vertical: bool = False
+
+@route('image/flip')
+def flip(req: Request[FlipModel]) -> str:
+    """Flip the active layer."""
+    p = req.params
+    if p.horizontal:
+        Krita.instance().action('mirrorLayerHorizontal').trigger()
+    if p.vertical:
+        Krita.instance().action('mirrorLayerVertical').trigger()
+    return 'done'
+
+@async_route('image/export')
+def export(req: AsyncRequest[ExportModel, str]):
+    """Export and respond after processing."""
+    # ... async work ...
+    req.ok('done')
 ```
 
-the request and response type would be (in typescript style):
+- **`Request[T]`** — `T` is inferred from the type hint; pydantic validates `param` against `T`.
+- **`AsyncRequest[T, OkT]`** — same, with `req.ok(payload)` / `req.fail(msg)` to respond.
+- Raise `ResponseFail(msg)` in sync handlers to return an error.
+
+View auto-generated docs: `curl -d '{"code": "__docs__", "param": {}}' localhost:1976`
+
+# Request / Response
 
 ```typescript
 type RequestBody = {
-    code: 'resource-icon',
-    param: {
-        resourceType: string,
-        resourceName: string,
-        withMIMEType?: boolean | null
-    }
+    code: string,       // route code
+    param: T,           // validated against pydantic model
 }
 
-type Response<T> = {
+type Response = {
     ok: true,
-    data: T, // at this point, is string
+    data: any,
 } | {
     ok: false,
     msg: string,
-    data: unknown,
+    data: any,
     call_stack: string,
 }
-
 ```
 
-response status code will always be 200, use field 'ok' to check the request status.
+Response is always HTTP 200 — use the `ok` field to check success.
 
-# limitation
+# Limitations
 
-For the http server:
+1. Server may reject connections under high concurrency due to `ThreadingMixIn`'s thread-per-request model. Clients should limit max connections.
+2. The client must poll state in duration to sync states, which may be expensive. (In practice, calling `state/get` every 33ms had no performance issues.)
 
-1. Sometimes it will timeout rather than throws exception when route code not found.
-2. Server will reject further connections when there's already several (8 i guess) connections, it's responsible for the client to limit max connections.
-3. The client must pull state in duration to sync states, it might be expensive. (but in my machine, i call 'state/get' in duration of 33ms and no performance problem found).
-
-# Documentation
-
-TODO you may check [V-YOP/krita-http-api-front](https://github.com/V-YOP/krita-http-api-front).
-
-# Call Flow
-
-If you'd like to imporve or modify this, check this sequence diagram explaining the handling process of an HTTP Request.
+# Architecture
 
 ![](./sequence_diagram.png)

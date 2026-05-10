@@ -1,117 +1,149 @@
 """
-basic API, like health check, API list, display floating message and some test API
+basic API: health check, API documentation, floating message, icon, and test routes.
 """
-from ..json_validate import Nullable
-from ..HttpRouter import ResponseFail
-from .route import route, router
-from typing import Any, Generic, TypeVar
-from krita import *
-from ..utils import *
-from PyQt5.QtCore import QTimer, QSize
+from typing import Optional, Literal
 
-@route('resource-icon', {
-    'resourceType': str,
-    'resourceName': str,
-})
-def resourceIcon(req):
-    resource = Krita.instance().resources(req['resourceType'])[req['resourceName']]
+from pydantic import BaseModel
+
+from krita import Krita
+
+from PyQt5.QtCore import QTimer, QSize
+from PyQt5.QtGui import QIcon
+
+from ..routing import Request, AsyncRequest, ResponseFail
+from ..utils import qimage_to_png_base64, floating_message
+from .route import route, async_route, router
+
+
+class ResourceIconModel(BaseModel):
+    resourceType: str
+    resourceName: str
+
+
+class FloatingMessageModel(BaseModel):
+    message: str
+    timeout: Optional[int] = None
+    priority: Optional[int] = None
+
+
+class IconModel(BaseModel):
+    iconName: str
+    size: tuple[int, int] = (200, 200)
+    mode: Literal["Normal", "Disabled", "Active", "Selected"] = "Normal"
+    state: Literal["On", "Off"] = "Off"
+
+
+# ------------------------------------------------------------------ #
+#  documentation
+# ------------------------------------------------------------------ #
+
+
+@route("__docs__")
+def api_docs(req: Request) -> str:
+    """Return API documentation as Markdown."""
+    return router.generate_docs()
+
+
+# ------------------------------------------------------------------ #
+#  core endpoints
+# ------------------------------------------------------------------ #
+
+
+@route("ping")
+def ping(req: Request) -> dict:
+    """Health check. Returns 'pong'."""
+    return {"msg": "pong"}
+
+
+@route("route-list")
+def route_list(req: Request) -> list[str]:
+    """List all registered route codes."""
+    return router.codes
+
+
+@route("resource-icon")
+def resource_icon(req: Request[ResourceIconModel]) -> str:
+    """Get a Krita resource icon as base64 PNG."""
+    p = req.params
+    resource = Krita.instance().resources(p.resourceType)[p.resourceName]
     return qimage_to_png_base64(resource.image())
 
 
-@route('floating-message', {
-    'message': str,
-    'timeout': Nullable(int),
-    'priority': Nullable(int),
-})
-def current_tool_get(req):
-    return floating_message(**req)
-
-@route('ping')
-def ping(req):
-    return {
-        'msg': 'pong',
-        'req': req,
-    }
+@route("floating-message")
+def floating_message_route(req: Request[FloatingMessageModel]) -> bool:
+    """Display a floating message in the active Krita view."""
+    return floating_message(**req.params.model_dump(exclude_none=True))
 
 
-@route('icon', {
-    'iconName': str,
-    'size': Nullable((int, int)),
-    'mode': Nullable({'Normal', 'Disabled', 'Active', 'Selected'}),
-    'state': Nullable({'On', 'Off'})
-})
-def icon(req):
-    iconName = req.get('iconName') 
-    size = req.get('size') or [200,200]
-    mode = req.get('mode') or 'Normal'
-    state = req.get('state') or 'Off'
-    
-    icon = Krita.instance().icon(iconName)
+@route("icon")
+def icon_route(req: Request[IconModel]) -> str:
+    """Get a Krita icon as base64 PNG."""
+    p = req.params
+    icon = Krita.instance().icon(p.iconName)
     if icon.isNull():
-        raise ResponseFail(f"icon {req} not found")
-    
-    if mode == 'Normal':
-        mode = QIcon.Mode.Normal
-    elif mode == 'Disabled':
-        mode = QIcon.Mode.Disabled
-    elif mode == 'Active':
-        mode = QIcon.Mode.Active
-    elif mode == 'Selected':
-        mode = QIcon.Mode.Selected
-    else:
-        mode = QIcon.Mode.Normal
-    
-    if state == 'On':
-        state = QIcon.State.On
-    elif state == 'Off':
-        state = QIcon.State.Off
-    else:
-        state = QIcon.State.Off
+        raise ResponseFail(f"icon '{p.iconName}' not found")
 
-    # 将QIcon转换为QPixmap
-    pixmap = icon.pixmap(QSize(size[0], size[1]), mode=mode, state=state)
-    # 将QPixmap转换为QImage
-    image = pixmap.toImage()
-
-    return qimage_to_png_base64(image)
-
-@route('route-list')
-def route_list(_):
-    return list(router.routers.keys())
-
-
-
-@route('sync-test')
-def sync_test(req):
-    return {
-        'req': req,
+    mode_map = {
+        "Normal": QIcon.Mode.Normal,
+        "Disabled": QIcon.Mode.Disabled,
+        "Active": QIcon.Mode.Active,
+        "Selected": QIcon.Mode.Selected,
     }
+    state_map = {"On": QIcon.State.On, "Off": QIcon.State.Off}
 
-@route('sync-except-test')
-def sync_except_test(req):
-    return 1 / 0
+    pixmap = icon.pixmap(
+        QSize(p.size[0], p.size[1]),
+        mode=mode_map.get(p.mode, QIcon.Mode.Normal),
+        state=state_map.get(p.state, QIcon.State.Off),
+    )
+    return qimage_to_png_base64(pixmap.toImage())
 
-@route('async-ok-test')
-def async_ok_test(req: Any, ok: Callable[[Any], None], fail: Callable[[str, Any], None]):
+
+# ------------------------------------------------------------------ #
+#  test endpoints
+# ------------------------------------------------------------------ #
+
+
+@route("sync-test")
+def sync_test(req: Request) -> dict:
+    """Simple sync test."""
+    return {"req": req.code}
+
+
+@route("sync-except-test")
+def sync_except_test(req: Request) -> dict:
+    """Sync handler that raises an exception."""
+    return 1 // 0
+
+
+@async_route("async-ok-test")
+def async_ok_test(req: AsyncRequest):
+    """Async handler that calls ok after 100ms."""
     def go():
-        ok({'req': req, "desc": "this is response body"})
+        req.ok({"desc": "this is response body"})
     QTimer.singleShot(100, go)
 
-@route('async-fail-test')
-def async_fail_test(req: Any, ok: Callable[[Any], None], fail: Callable[[str, Any], None]):
+
+@async_route("async-fail-test")
+def async_fail_test(req: AsyncRequest):
+    """Async handler that calls fail after 100ms."""
     def go():
-        fail("this is fail message", {'req': req, "desc": "this is response body"})
+        req.fail("this is fail message", {"desc": "this is response body"})
     QTimer.singleShot(100, go)
 
-@route('async-timeout-test')
-def async_timeout_test(req: Any, ok: Callable[[Any], None], fail: Callable[[str, Any], None]):
+
+@async_route("async-timeout-test")
+def async_timeout_test(req: AsyncRequest):
+    """Async handler that never responds (will timeout after 5s)."""
     pass
-    # when ok and fail is not invoked (like you forget to call it, or some exception arised) for 5 s, it will timeout and respond a error message
 
-# 控制器中始终是单线程的，编程模型和 js 一样
-counter = 0
-@route('thread-safe-test')
-def thread_safe_test(_):
-    global counter
-    counter += 1
-    return counter
+
+_counter = 0
+
+
+@route("thread-safe-test")
+def thread_safe_test(req: Request) -> int:
+    """Increment a counter — verifies handler runs on main thread."""
+    global _counter
+    _counter += 1
+    return _counter

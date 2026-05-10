@@ -1,128 +1,142 @@
 """
-get and set docker display status
+get and set docker display status.
 """
-from ..json_validate import Nullable
-from ..HttpRouter import ResponseFail
-from .route import route, router
-from typing import Any
-from krita import *
-from ..utils import *
-from PyQt5.QtCore import QTimer, QRect
+from typing import Optional
+
+from pydantic import BaseModel
+
+from krita import Krita
+
 from PyQt5.QtWidgets import QDockWidget, QWidget
 
-# windowObjectName+dockerObjectName
-docker_original_titlebar_bucket = {}
+from ..routing import Request, ResponseFail
+from .route import route
 
-def docker_headless(docker: QDockWidget):
-    print(Krita.instance().activeWindow().dockers()[0].window().objectName())
-    res = docker.titleBarWidget().objectName().startswith(f"EMPTY_")
 
+class DockerSetStateModel(BaseModel):
+    objectName: str
+    visible: Optional[bool] = None
+    floating: Optional[bool] = None
+    pos: Optional[tuple[int, int]] = None
+    size: Optional[tuple[int, int]] = None
+    withHeader: Optional[bool] = None
+
+
+_docker_original_titlebar: dict[str, QWidget] = {}
+
+
+def _docker_headless(docker: QDockWidget) -> bool:
+    result = docker.titleBarWidget().objectName().startswith("EMPTY_")
     docker_id = docker.window().objectName() + docker.objectName()
-    if docker_id not in docker_original_titlebar_bucket:
-        if res:
-            pass # 没有缓存时已经没有header了，这说明它的header被其他人丢掉了，这时候什么都做不了
-        else:
-            docker_original_titlebar_bucket[docker_id] = docker.titleBarWidget()
-    return res
+    if docker_id not in _docker_original_titlebar:
+        if not result:
+            _docker_original_titlebar[docker_id] = docker.titleBarWidget()
+    return result
 
-def set_docker_headless(docker: QDockWidget, headless: bool):
-    if docker_headless(docker) == headless:
+
+def _set_docker_headless(docker: QDockWidget, headless: bool):
+    if _docker_headless(docker) == headless:
         return
-    
     if headless:
-        x = QWidget()
-        x.setObjectName(f"EMPTY_{docker.objectName()}")
-        docker.setTitleBarWidget(x)
+        w = QWidget()
+        w.setObjectName(f"EMPTY_{docker.objectName()}")
+        docker.setTitleBarWidget(w)
     else:
         docker_id = docker.window().objectName() + docker.objectName()
-        if old_titlebar := docker_original_titlebar_bucket.get(docker_id):
+        old = _docker_original_titlebar.get(docker_id)
+        if old:
             x = docker.titleBarWidget()
-            docker.setTitleBarWidget(old_titlebar)
+            docker.setTitleBarWidget(old)
             x.deleteLater()
-        
 
-@route('docker/list')
-def docker_list(_):
-    res = {}
+
+@route("docker/list")
+def docker_list(req: Request) -> dict:
+    """List all dockers with visibility, floating state, and header status."""
+    result = {}
     for docker in Krita.instance().dockers():
         geo = docker.geometry()
-        res[docker.objectName()] = dict(
+        result[docker.objectName()] = dict(
             visible=docker.isVisible(),
             floating=docker.isFloating(),
-            withHeader=not docker_headless(docker)
+            withHeader=not _docker_headless(docker),
         )
         if docker.isFloating():
-            res[docker.objectName()]['geometry'] = [geo.x(), geo.y(), geo.width(), geo.height()],
-    return res
+            result[docker.objectName()]["geometry"] = [
+                geo.x(), geo.y(), geo.width(), geo.height()
+            ]
+    return result
 
-@route('docker/get-state', str)
-def docker_list(objectName):
-    docker = next((i for i in Krita.instance().dockers() if i.objectName() == objectName), None)
+
+@route("docker/get-state")
+def docker_get_state(req: Request[str]) -> dict:
+    """Get full state for a specific docker by objectName."""
+    object_name = req.params
+    docker = next(
+        (d for d in Krita.instance().dockers() if d.objectName() == object_name),
+        None,
+    )
     if docker is None:
-        raise ResponseFail(f"No docker named '{objectName}'")
+        raise ResponseFail(f"No docker named '{object_name}'")
     geo = docker.geometry()
     return dict(
-        objectName=objectName,
+        objectName=object_name,
         visible=docker.isVisible(),
         floating=docker.isFloating(),
         pos=[geo.x(), geo.y()],
         size=[geo.width(), geo.height()],
-        withHeader=not docker_headless(docker)
+        withHeader=not _docker_headless(docker),
     )
 
-@route('docker/set-state', {
-    'objectName': str,
-    'visible': Nullable(bool),
-    'floating': Nullable(bool),
-    'pos': Nullable((int, int)),
-    'size': Nullable((int, int)),
-    'withHeader': Nullable(bool),
-})
-def docker_setstate(req):
-    assert isinstance(req, dict), 'param must be json object'
-    objectName = req['objectName']
-    visible = req.get('visible')
-    floating = req.get('floating')
-    pos = req.get('pos')
-    size = req.get('size')
-    with_header = req.get('withHeader')
 
-    docker = next((i for i in Krita.instance().dockers() if i.objectName() == objectName), None)
+@route("docker/set-state")
+def docker_set_state(req: Request[DockerSetStateModel]) -> dict:
+    """Set visibility, floating, position, size, or header for a docker."""
+    p = req.params
+    docker = next(
+        (d for d in Krita.instance().dockers() if d.objectName() == p.objectName),
+        None,
+    )
     if docker is None:
-        raise ResponseFail(f"No docker named '{objectName}'")
+        raise ResponseFail(f"No docker named '{p.objectName}'")
 
-    res = {'objectName': objectName}
-    if visible is not None:
+    result = {"objectName": p.objectName}
+
+    if p.visible is not None:
         geo = docker.geometry()
-        docker.setVisible(visible)
+        docker.setVisible(p.visible)
         docker.setGeometry(geo)
-        res['visible'] = visible
-    if floating is not None:
-        docker.setFloating(floating)
-        res['floating'] = floating
+        result["visible"] = p.visible
 
-    if pos is not None or size is not None:
+    if p.floating is not None:
+        docker.setFloating(p.floating)
+        result["floating"] = p.floating
+
+    if p.pos is not None or p.size is not None:
         geo = docker.geometry()
-        res['oldgeo'] = [geo.x(), geo.y(), geo.width(), geo.height()]
-        if pos is not None:
-            geo.setX(pos[0])
-            geo.setY(pos[1])
-            res['pos'] = pos
-        if size is not None:
-            geo.setWidth(size[0])
-            geo.setHeight(size[1])
-            res['size'] = size
+        result["oldgeo"] = [geo.x(), geo.y(), geo.width(), geo.height()]
+        if p.pos is not None:
+            geo.setX(p.pos[0])
+            geo.setY(p.pos[1])
+            result["pos"] = p.pos
+        if p.size is not None:
+            geo.setWidth(p.size[0])
+            geo.setHeight(p.size[1])
+            result["size"] = p.size
         docker.setGeometry(geo)
         docker.repaint()
         geo = docker.geometry()
-        res['newgeo'] = [geo.x(), geo.y(), geo.width(), geo.height()]
+        result["newgeo"] = [geo.x(), geo.y(), geo.width(), geo.height()]
 
-    if with_header is not None:
-        set_docker_headless(docker, not with_header)
-    return res
+    if p.withHeader is not None:
+        _set_docker_headless(docker, not p.withHeader)
 
-@route('docker/hide-all')
-def docker_hide(_):
+    return result
+
+
+@route("docker/hide-all")
+def docker_hide_all(req: Request) -> bool:
+    """Hide all dockers."""
     for docker in Krita.instance().dockers():
-        Krita.instance().activeWindow().dockers()[0].window()
         docker.setVisible(False)
+    return True

@@ -1,33 +1,41 @@
+import inspect
 from datetime import datetime
+
 from PyQt5.QtCore import qInfo, qWarning
+
 
 class Logger:
     def __init__(self, name: str = ""):
-        self.name = name
-        if self.name is None or self.name == "":
-            self.name = self.__caller_filename()
+        self.name = name if name else self._detect_caller()
 
     @staticmethod
-    def __caller_filename():
-        import inspect
-        stack = inspect.stack()
-        caller_frame = stack[2]
-        full_filepath = caller_frame.filename.replace("\\", "/")
-        return full_filepath[full_filepath.rindex("pykrita/") + len("pykrita/"):]
+    def _detect_caller() -> str:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back.f_back
+            filepath = caller.f_code.co_filename.replace("\\", "/")
+        finally:
+            del frame
 
-    def __format(self, level: str, msg: str):
-        import inspect
-        stack = inspect.stack()
-        caller_frame = stack[2]
+        try:
+            idx = filepath.rindex("pykrita/")
+            return filepath[idx + len("pykrita/"):]
+        except ValueError:
+            return filepath
+
+    def _format(self, level: str, msg: str) -> bytes:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back.f_back
+            lineno = caller.f_lineno
+        finally:
+            del frame
+
         datestr = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        return f"[{level}][{self.name}:{caller_frame.lineno}] {datestr}: {msg}".encode("utf-8")
+        return f"[{level}][{self.name}:{lineno}] {datestr}: {msg}".encode("utf-8")
 
     def info(self, msg: str):
-        qInfo(self.__format('INFO', msg))
+        qInfo(self._format('INFO', msg))
 
     def warn(self, msg: str):
-        qWarning(self.__format("WARN", msg))
-
-    # call this will terminate krita!
-    # def error(self, msg: str):
-    #     qFatal(self.__format("FATAL", msg))
+        qWarning(self._format("WARN", msg))
